@@ -17,11 +17,17 @@ interface EvtSwapEvent {
   timestamp: number;
   timestampISO: string;
   transactionSignature: string;
+  trader?: string; // Add trader field
 }
 
 class EvtSwapDecoder {
   private connection: Connection;
   private readonly SWAP_EVENT_DISCRIMINATOR = Buffer.from([27, 60, 21, 213, 138, 170, 187, 147]);
+  private TOKEN_PROGRAM_IDS = [
+    'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', // SPL Token classic
+    'TokenzQdB6q6JbTnKk6jJpN6h8Y8pY8pY8pY8pY8pY8p'  // SPL Token 2022
+  ];
+  private traderAuthority: string | null = null;
 
   constructor() {
     this.connection = new Connection('https://mainnet.helius-rpc.com/?api-key=29c1bedf-6af2-4f78-bdf5-bf4765e0a741');
@@ -126,7 +132,8 @@ class EvtSwapDecoder {
         referralFee: Number(referralFee),
         timestamp: Number(timestamp),
         timestampISO: new Date(Number(timestamp) * 1000).toISOString(),
-        transactionSignature: transaction.transaction?.signatures?.[0] || 'Unknown'
+        transactionSignature: transaction.transaction?.signatures?.[0] || 'Unknown',
+        trader: this.traderAuthority || undefined // Add trader address
       };
       
     } catch (error) {
@@ -181,6 +188,44 @@ class EvtSwapDecoder {
     return events;
   }
 
+  private printTransferCheckedInstructions(transaction: any): void {
+    const staticAccountKeys = transaction.transaction?.message?.staticAccountKeys || [];
+    const printTransfer = (ix: any, accounts: number[], where: string) => {
+      if (this.traderAuthority) return; // already found first — skip
+      let rawData: Buffer;
+      try {
+        rawData = Buffer.isBuffer(ix.data) ? ix.data : Buffer.from(bs58.decode(ix.data));
+      } catch {
+        return;
+      }
+      if (rawData[0] !== 12 || accounts.length < 4) return;
+      const authority = staticAccountKeys[accounts[3]]?.toString?.() || staticAccountKeys[accounts[3]];
+      // Save and log
+      this.traderAuthority = authority;
+      console.log(`\n💸 SPL Token TransferChecked (${where}):`);
+      console.log('==========================================');
+      console.log(`🎯 Trader authority: ${authority}`);
+    };
+    // Main instructions
+    for (const ix of transaction.transaction?.message?.compiledInstructions || []) {
+      const programId = staticAccountKeys[ix.programIdIndex]?.toString?.() || staticAccountKeys[ix.programIdIndex];
+      if (this.TOKEN_PROGRAM_IDS.includes(programId)) {
+        printTransfer(ix, ix.accountKeyIndexes, 'main');
+        if (this.traderAuthority) return;
+      }
+    }
+    // Inner instructions
+    for (const inner of transaction.meta?.innerInstructions || []) {
+      for (const ix of inner.instructions) {
+        const programId = staticAccountKeys[ix.programIdIndex]?.toString?.() || staticAccountKeys[ix.programIdIndex];
+        if (this.TOKEN_PROGRAM_IDS.includes(programId)) {
+          printTransfer(ix, ix.accounts, `inner[${inner.index}]`);
+          if (this.traderAuthority) return;
+        }
+      }
+    }
+  }
+
   private displayEvent(event: EvtSwapEvent): void {
     console.log('\n📊 Decoded EvtSwap Event:');
     console.log('='.repeat(50));
@@ -197,11 +242,16 @@ class EvtSwapDecoder {
     console.log(`🏛️ Protocol Fee: ${event.protocolFee.toLocaleString()}`);
     console.log(`🎯 Referral Fee: ${event.referralFee.toLocaleString()}`);
     console.log(`⏰ Timestamp: ${event.timestamp.toLocaleString()} (${event.timestampISO})`);
+    if (event.trader) {
+      console.log(`👤 Trader: ${event.trader}`);
+    }
     console.log(`🔗 Transaction Signature: ${event.transactionSignature}`);
   }
 
   async decodeTransaction(transactionHash: string): Promise<void> {
+    
     try {
+      this.traderAuthority = null; // Reset for each transaction
       console.log(`🔍 Decoding transaction: ${transactionHash}`);
       
       const transaction = await this.connection.getTransaction(transactionHash, {
@@ -212,6 +262,9 @@ class EvtSwapDecoder {
         console.error('❌ Transaction not found');
         return;
       }
+    
+      // Print SPL Token TransferChecked instructions
+      this.printTransferCheckedInstructions(transaction);
       
       const events = this.scanTransactionForEvents(transaction);
       
@@ -247,3 +300,4 @@ async function main() {
 if (require.main === module) {
   main().catch(console.error);
 } 
+//npx ts-node src/scripts/debug-tx.ts  2upLyZbaaYcb8qSrLFnuv2fcSvAyK2oAAV62e4HC37tjGdfnUytD31K8dz55ttz2SEffmV41hFw4rXV2BDvP1Z9v
